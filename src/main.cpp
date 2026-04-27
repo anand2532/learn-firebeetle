@@ -12,8 +12,7 @@
 #define OLED_CS   5
 #define OLED_RST  17
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
-                        OLED_MOSI, OLED_CLK, OLED_DC, OLED_RST, OLED_CS);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RST, OLED_CS);
 
 enum Emotion {
   EMO_HAPPY = 0,
@@ -144,12 +143,24 @@ void drawSmiley(Emotion emo, bool blinking, int bobOffset) {
 
 void setup() {
   Serial.begin(115200);
+  SPI.begin(OLED_CLK, -1, OLED_MOSI, OLED_CS);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC)) {
     Serial.println("OLED init failed");
     while (true);
   }
 
+  // Boot confirmation pattern to verify panel is alive before animation starts.
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.println("OLED OK");
+  display.drawRect(0, 12, SCREEN_WIDTH, SCREEN_HEIGHT - 12, WHITE);
+  display.drawLine(0, 12, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, WHITE);
+  display.drawLine(SCREEN_WIDTH - 1, 12, 0, SCREEN_HEIGHT - 1, WHITE);
+  display.display();
+  delay(900);
   display.clearDisplay();
   display.display();
 
