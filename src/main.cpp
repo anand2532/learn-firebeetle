@@ -36,131 +36,151 @@ U8G2_SSD1306_128X64_NONAME_F_4W_SW_SPI display(U8G2_R0, OLED_CLK, OLED_MOSI, OLE
 U8G2_SSD1306_128X64_NONAME_F_4W_HW_SPI display(U8G2_R0, OLED_CS, OLED_DC, OLED_RST_PIN);
 #endif
 
-enum Emotion {
-  EMO_HAPPY = 0,
-  EMO_NEUTRAL,
-  EMO_SAD,
-  EMO_SURPRISED,
-  EMO_WINK
-};
+const unsigned long SCENE_INTRO_MS = 12000;
+const unsigned long SCENE_WALK_MS = 26000;
+const unsigned long SCENE_CHARGE_MS = 20000;
+const unsigned long SCENE_PUNCH_MS = 15000;
+const unsigned long SCENE_COOLDOWN_MS = 17000;
+const unsigned long MOVIE_LOOP_MS =
+    SCENE_INTRO_MS + SCENE_WALK_MS + SCENE_CHARGE_MS + SCENE_PUNCH_MS + SCENE_COOLDOWN_MS;
 
-const unsigned long EMOTION_HOLD_MS = 2600;
-const unsigned long BLINK_PERIOD_MS = 3200;
-const unsigned long BLINK_DURATION_MS = 140;
+unsigned long movieStartMs = 0;
 
-unsigned long lastEmotionChangeMs = 0;
-Emotion currentEmotion = EMO_HAPPY;
-
-void drawFaceOutline(int cx, int cy, int radius) {
-  display.drawCircle(cx, cy, radius);
-  display.drawCircle(cx, cy, radius - 1);
+void drawSpeedLines(uint8_t phase) {
+  for (int i = 0; i < 7; ++i) {
+    int x = static_cast<int>((phase * 9 + i * 17) % 128);
+    int y = 14 + i * 7;
+    display.drawLine(x, y, x + 12, y);
+  }
 }
 
-void drawEyeOpen(int x, int y) {
-  display.drawDisc(x, y, 4);
+void drawDustCloud(int x, int y, int spread) {
+  display.drawCircle(x, y, 2 + spread / 3);
+  display.drawCircle(x + 4, y + 1, 2 + spread / 4);
+  display.drawCircle(x - 4, y + 1, 2 + spread / 4);
+}
+
+void drawHero(int x, int y, bool punchPose, bool eyesSquint, uint8_t legPhase) {
+  // Head
+  display.drawCircle(x, y - 12, 7);
+  display.drawCircle(x, y - 12, 6);
+
+  // Eyes
+  if (eyesSquint) {
+    display.drawLine(x - 4, y - 13, x - 1, y - 13);
+    display.drawLine(x + 1, y - 13, x + 4, y - 13);
+  } else {
+    display.drawPixel(x - 3, y - 13);
+    display.drawPixel(x + 3, y - 13);
+  }
+
+  // Cape
+  display.drawLine(x - 5, y - 5, x - 11, y + 5);
+  display.drawLine(x - 4, y - 4, x - 13, y + 10);
+  display.drawLine(x - 3, y - 3, x - 10, y + 12);
+
+  // Body
+  display.drawLine(x, y - 5, x, y + 10);
+  display.drawLine(x - 1, y - 5, x - 1, y + 10);
+
+  // Arms
+  if (punchPose) {
+    display.drawLine(x, y - 1, x + 14, y - 4);
+    display.drawLine(x, y, x + 14, y - 3);
+    display.drawDisc(x + 16, y - 4, 2);
+    display.drawLine(x - 1, y + 1, x - 7, y + 5);
+  } else {
+    display.drawLine(x, y, x + 6, y + 2);
+    display.drawLine(x - 1, y + 1, x - 7, y + 4);
+  }
+
+  // Legs (simple walk cycle)
+  if (legPhase & 1U) {
+    display.drawLine(x - 1, y + 10, x - 6, y + 18);
+    display.drawLine(x, y + 10, x + 4, y + 18);
+  } else {
+    display.drawLine(x - 1, y + 10, x - 4, y + 18);
+    display.drawLine(x, y + 10, x + 6, y + 18);
+  }
+}
+
+void drawEnemy(int x, int y, uint8_t wobble) {
+  int wobbleY = (wobble & 1U) ? 1 : 0;
+  display.drawFrame(x - 6, y - 10 + wobbleY, 12, 20);
+  display.drawCircle(x, y - 14 + wobbleY, 5);
+  display.drawPixel(x - 2, y - 15 + wobbleY);
+  display.drawPixel(x + 2, y - 15 + wobbleY);
+  display.drawLine(x - 3, y - 12 + wobbleY, x + 3, y - 12 + wobbleY);
+}
+
+void drawBanner(const char* text) {
+  display.drawBox(0, 0, 128, 11);
   display.setDrawColor(0);
-  display.drawDisc(x, y, 2);
+  display.setFont(u8g2_font_6x12_tf);
+  display.drawStr(2, 9, text);
   display.setDrawColor(1);
 }
 
-void drawEyeClosed(int x, int y) {
-  display.drawLine(x - 5, y, x + 5, y);
+void drawSceneIntro(unsigned long localMs) {
+  drawBanner("ANIME HERO TRAINING");
+  int heroX = 18 + static_cast<int>((localMs / 220) % 6);
+  drawHero(heroX, 41, false, false, static_cast<uint8_t>(localMs / 180));
+  display.drawStr(56, 30, "100 PUSH UPS");
+  display.drawStr(56, 44, "100 SIT UPS");
+  display.drawStr(56, 58, "RUN 10 KM");
 }
 
-void drawMouthHappy(int x, int y) {
-  display.drawArc(x, y + 2, 11, 30, 150);
-  display.drawArc(x, y + 3, 11, 30, 150);
-}
-
-void drawMouthNeutral(int x, int y) {
-  display.drawLine(x - 10, y + 6, x + 10, y + 6);
-  display.drawLine(x - 10, y + 7, x + 10, y + 7);
-}
-
-void drawMouthSad(int x, int y) {
-  display.drawArc(x, y + 18, 11, 210, 250);
-  display.drawArc(x, y + 19, 11, 210, 250);
-}
-
-void drawMouthSurprised(int x, int y) {
-  display.drawCircle(x, y + 6, 6);
-  display.drawCircle(x, y + 6, 5);
-}
-
-void drawCheeks(int xLeft, int xRight, int y) {
-  display.drawCircle(xLeft, y, 2);
-  display.drawCircle(xRight, y, 2);
-}
-
-void drawTitle(Emotion emo) {
-  display.setFont(u8g2_font_6x12_tf);
-  display.drawStr(2, 10, "Emotion:");
-  switch (emo) {
-    case EMO_HAPPY:
-      display.drawStr(52, 10, "Happy");
-      break;
-    case EMO_NEUTRAL:
-      display.drawStr(52, 10, "Calm");
-      break;
-    case EMO_SAD:
-      display.drawStr(52, 10, "Sad");
-      break;
-    case EMO_SURPRISED:
-      display.drawStr(52, 10, "Wow");
-      break;
-    case EMO_WINK:
-      display.drawStr(52, 10, "Wink");
-      break;
+void drawSceneWalk(unsigned long localMs) {
+  drawBanner("CITY PATROL");
+  int heroX = 8 + static_cast<int>((localMs / 120) % 112);
+  drawHero(heroX, 42, false, false, static_cast<uint8_t>(localMs / 120));
+  display.drawLine(0, 60, 127, 60);
+  for (int i = 0; i < 4; ++i) {
+    int bx = (i * 34 + static_cast<int>(localMs / 6)) % 128;
+    display.drawFrame(bx, 44, 18, 16);
+    display.drawPixel(bx + 4, 48);
+    display.drawPixel(bx + 10, 50);
+    display.drawPixel(bx + 14, 55);
   }
 }
 
-void drawSmiley(Emotion emo, bool blinking, int bobOffset) {
-  const int cx = 64;
-  const int cy = 37 + bobOffset;
-  const int eyeY = cy - 7;
-  const int leftEyeX = cx - 11;
-  const int rightEyeX = cx + 11;
+void drawSceneCharge(unsigned long localMs) {
+  drawBanner("SERIOUS MODE");
+  int heroX = 42;
+  drawHero(heroX, 42, false, true, static_cast<uint8_t>(localMs / 120));
+  drawEnemy(100, 45, static_cast<uint8_t>(localMs / 220));
 
-  drawFaceOutline(cx, cy, 24);
-
-  bool leftClosed = blinking;
-  bool rightClosed = blinking;
-
-  if (emo == EMO_WINK) {
-    leftClosed = true;
-    rightClosed = false;
+  uint8_t aura = static_cast<uint8_t>((localMs / 140) % 4);
+  for (uint8_t r = 0; r < aura + 2; ++r) {
+    display.drawCircle(heroX, 30, 10 + r * 3);
   }
+  drawSpeedLines(static_cast<uint8_t>(localMs / 90));
+}
 
-  if (leftClosed) {
-    drawEyeClosed(leftEyeX, eyeY);
-  } else {
-    drawEyeOpen(leftEyeX, eyeY);
-  }
+void drawScenePunch(unsigned long localMs) {
+  drawBanner("ONE HIT ATTACK!");
+  int heroX = 50 + static_cast<int>((localMs / 80) % 10);
+  drawHero(heroX, 41, true, true, static_cast<uint8_t>(localMs / 80));
 
-  if (rightClosed) {
-    drawEyeClosed(rightEyeX, eyeY);
-  } else {
-    drawEyeOpen(rightEyeX, eyeY);
-  }
+  int impactX = 92 + static_cast<int>((localMs / 60) % 8);
+  int impactY = 35;
+  display.drawCircle(impactX, impactY, 8);
+  display.drawCircle(impactX, impactY, 12);
+  display.drawLine(impactX - 16, impactY, impactX + 16, impactY);
+  display.drawLine(impactX, impactY - 16, impactX, impactY + 16);
+  display.drawStr(82, 58, "B O O M");
+  drawDustCloud(106, 55, static_cast<int>((localMs / 120) % 5));
+}
 
-  switch (emo) {
-    case EMO_HAPPY:
-      drawMouthHappy(cx, cy + 1);
-      drawCheeks(cx - 16, cx + 16, cy + 2);
-      break;
-    case EMO_NEUTRAL:
-      drawMouthNeutral(cx, cy + 2);
-      break;
-    case EMO_SAD:
-      drawMouthSad(cx, cy + 2);
-      break;
-    case EMO_SURPRISED:
-      drawMouthSurprised(cx, cy + 1);
-      break;
-    case EMO_WINK:
-      drawMouthHappy(cx, cy + 1);
-      break;
-  }
+void drawSceneCooldown(unsigned long localMs) {
+  drawBanner("BACK TO NORMAL");
+  int heroX = 20 + static_cast<int>((localMs / 300) % 4);
+  drawHero(heroX, 42, false, false, static_cast<uint8_t>(localMs / 200));
+  drawDustCloud(86, 52, static_cast<int>((localMs / 240) % 4));
+  drawDustCloud(96, 55, static_cast<int>((localMs / 210) % 4));
+  drawDustCloud(106, 53, static_cast<int>((localMs / 190) % 4));
+  display.drawStr(58, 30, "THREAT GONE");
+  display.drawStr(58, 44, "GROCERY TIME");
 }
 
 void setup() {
@@ -200,24 +220,23 @@ void setup() {
   display.sendBuffer();
   delay(250);
 
-  lastEmotionChangeMs = millis();
+  movieStartMs = millis();
 }
 
 void loop() {
-  const unsigned long now = millis();
-
-  if (now - lastEmotionChangeMs >= EMOTION_HOLD_MS) {
-    currentEmotion = static_cast<Emotion>((static_cast<int>(currentEmotion) + 1) % 5);
-    lastEmotionChangeMs = now;
-  }
-
-  const bool blinking = (now % BLINK_PERIOD_MS) < BLINK_DURATION_MS;
-  const int bobOffset = static_cast<int>((now / 260) % 2) == 0 ? 0 : 1;
-
+  const unsigned long elapsed = (millis() - movieStartMs) % MOVIE_LOOP_MS;
   display.clearBuffer();
-  drawTitle(currentEmotion);
-  drawSmiley(currentEmotion, blinking, bobOffset);
+  if (elapsed < SCENE_INTRO_MS) {
+    drawSceneIntro(elapsed);
+  } else if (elapsed < SCENE_INTRO_MS + SCENE_WALK_MS) {
+    drawSceneWalk(elapsed - SCENE_INTRO_MS);
+  } else if (elapsed < SCENE_INTRO_MS + SCENE_WALK_MS + SCENE_CHARGE_MS) {
+    drawSceneCharge(elapsed - SCENE_INTRO_MS - SCENE_WALK_MS);
+  } else if (elapsed < SCENE_INTRO_MS + SCENE_WALK_MS + SCENE_CHARGE_MS + SCENE_PUNCH_MS) {
+    drawScenePunch(elapsed - SCENE_INTRO_MS - SCENE_WALK_MS - SCENE_CHARGE_MS);
+  } else {
+    drawSceneCooldown(elapsed - SCENE_INTRO_MS - SCENE_WALK_MS - SCENE_CHARGE_MS - SCENE_PUNCH_MS);
+  }
   display.sendBuffer();
-
-  delay(25);
+  delay(33);
 }
