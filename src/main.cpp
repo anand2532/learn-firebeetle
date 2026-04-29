@@ -34,26 +34,32 @@ Adafruit_INA219 ina219;
 const unsigned long REFRESH_MS = 500;
 unsigned long lastRefreshMs = 0;
 bool inaReady = false;
+bool warnedRail = false;
 
-void drawReadings(float busV, float shuntmV, float current_mA, float power_mW) {
+void drawReadings(float busV, float shuntmV, float loadV, float current_mA, float power_mW, bool reverseFlow, bool suspectWiring, bool shuntRailed) {
   display.clearBuffer();
   display.setFont(u8g2_font_6x12_tf);
-  display.drawStr(0, 10, "Power Monitor");
+  display.drawStr(0, 10, "INA219 Monitor");
   display.drawHLine(0, 12, 128);
 
   char line[24];
-  display.setFont(u8g2_font_logisoso16_tf);
-  snprintf(line, sizeof(line), "%5.2f V", busV);
-  display.drawStr(0, 32, line);
-  snprintf(line, sizeof(line), "%6.1f mA", current_mA);
-  display.drawStr(0, 50, line);
-
   display.setFont(u8g2_font_6x12_tf);
-  snprintf(line, sizeof(line), "P %6.1f mW", power_mW);
-  display.drawStr(0, 63, line);
+  snprintf(line, sizeof(line), "Bus  %5.2f V", busV);
+  display.drawStr(0, 24, line);
+  snprintf(line, sizeof(line), "Load %5.2f V", loadV);
+  display.drawStr(0, 35, line);
+  snprintf(line, sizeof(line), "I %7.1f mA", current_mA);
+  display.drawStr(0, 46, line);
+  snprintf(line, sizeof(line), "P %7.1f mW", power_mW);
+  display.drawStr(0, 57, line);
 
-  // Suppress unused-parameter warning while keeping shunt available for future use.
-  (void)shuntmV;
+  if (shuntRailed) {
+    display.drawStr(0, 64, "SHUNT RAIL");
+  } else if (reverseFlow) {
+    display.drawStr(0, 64, "DIR:REV");
+  } else if (suspectWiring) {
+    display.drawStr(0, 64, "CHK GND/VIN");
+  }
 
   display.sendBuffer();
 }
@@ -80,6 +86,7 @@ void setup() {
 #endif
 
   Wire.begin(INA_SDA, INA_SCL);
+  Wire.setClock(100000);
   inaReady = ina219.begin();
   if (inaReady) {
     // 12V rail with up to ~2A loads. Resolution ~0.8mA, 4mV bus.
@@ -117,10 +124,36 @@ void loop() {
   const float shuntmV    = ina219.getShuntVoltage_mV();
   const float busV       = ina219.getBusVoltage_V();
   const float current_mA = ina219.getCurrent_mA();
-  const float power_mW   = ina219.getPower_mW();
+  const float loadV      = busV + (shuntmV / 1000.0f);
+  const bool shuntRailed = fabsf(shuntmV) >= 319.0f;
+  const float power_mW   = shuntRailed ? 0.0f : (loadV * current_mA);
+  const bool reverseFlow = current_mA < -5.0f;
+  const bool suspectWiring = (busV < 2.0f && fabsf(shuntmV) > 20.0f) || shuntRailed;
 
-  Serial.printf("Vbus=%.2fV  Vshunt=%.2fmV  I=%.2fmA  P=%.2fmW\n",
-                busV, shuntmV, current_mA, power_mW);
+  Serial.printf("Vbus=%.2fV  Vload=%.2fV  Vshunt=%.2fmV  I=%.2fmA  P=%.2fmW",
+                busV, loadV, shuntmV, current_mA, power_mW);
+  if (shuntRailed) {
+    Serial.print("  [FAULT: shunt input railed +/-320mV; input saturated/floating]");
+  } else if (reverseFlow) {
+    Serial.print("  [WARN: reverse current; swap VIN+ and VIN-]");
+  } else if (suspectWiring) {
+    Serial.print("  [WARN: low bus + high shunt; check common GND and load path]");
+  }
+  Serial.println();
 
-  drawReadings(busV, shuntmV, current_mA, power_mW);
+  if (shuntRailed && !warnedRail) {
+    warnedRail = true;
+    Serial.println("DIAG: INA219 shunt channel is saturated.");
+    Serial.println("DIAG: Common causes:");
+    Serial.println("  1) VIN+ and VIN- not truly in series with the load.");
+    Serial.println("  2) Load negative is not returned to 12V supply negative.");
+    Serial.println("  3) 12V supply negative not tied to ESP32/INA219 GND.");
+    Serial.println("  4) VIN- node floating (no real load connected).");
+    Serial.println("DIAG: Use a multimeter now:");
+    Serial.println("  - Measure VIN+ to GND (should be ~12V)");
+    Serial.println("  - Measure VIN- to GND (should be near VIN+ when idle)");
+    Serial.println("  - Measure VIN+ to VIN- (should be near 0mV at light/no load)");
+  }
+
+  drawReadings(busV, shuntmV, loadV, current_mA, power_mW, reverseFlow, suspectWiring, shuntRailed);
 }
