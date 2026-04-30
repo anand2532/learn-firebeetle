@@ -2,6 +2,7 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <U8g2lib.h>
+#include <Adafruit_INA238.h>
 #include <Adafruit_INA219.h>
 
 // --- OLED pins (unchanged from working bring-up) ---
@@ -26,49 +27,73 @@ U8G2_SSD1306_128X64_NONAME_F_4W_SW_SPI display(U8G2_R0, OLED_CLK, OLED_MOSI, OLE
 U8G2_SSD1306_128X64_NONAME_F_4W_HW_SPI display(U8G2_R0, OLED_CS, OLED_DC, OLED_RST);
 #endif
 
-// --- INA219 ---
+// --- I2C / sensors ---
 #define INA_SDA 21
 #define INA_SCL 22
-Adafruit_INA219 ina219;
+
+Adafruit_INA238 ina238;            // default address 0x40
+Adafruit_INA219 ina219(0x41);      // A0 jumpered for 0x41
+
+bool ina238Ready = false;
+bool ina219Ready = false;
 
 const unsigned long REFRESH_MS = 500;
 unsigned long lastRefreshMs = 0;
-bool inaReady = false;
-bool warnedRail = false;
+constexpr float SHUNT_OHMS = 0.1f;
 
-void drawReadings(float busV, float shuntmV, float loadV, float current_mA, float power_mW, bool reverseFlow, bool suspectWiring, bool shuntRailed) {
-  display.clearBuffer();
-  display.setFont(u8g2_font_6x12_tf);
-  display.drawStr(0, 10, "INA219 Monitor");
-  display.drawHLine(0, 12, 128);
+struct SensorReading {
+  bool ready;
+  float busV;
+  float current_mA;
+  float power_mW;
+  float shuntmV;
+  bool reverse;
+  bool railed;
+  bool noLoad;
+};
 
-  char line[24];
-  display.setFont(u8g2_font_6x12_tf);
-  snprintf(line, sizeof(line), "Bus  %5.2f V", busV);
-  display.drawStr(0, 24, line);
-  snprintf(line, sizeof(line), "Load %5.2f V", loadV);
-  display.drawStr(0, 35, line);
-  snprintf(line, sizeof(line), "I %7.1f mA", current_mA);
-  display.drawStr(0, 46, line);
-  snprintf(line, sizeof(line), "P %7.1f mW", power_mW);
-  display.drawStr(0, 57, line);
+static void drawColumn(int x, const char* title, const SensorReading& r) {
+  display.drawStr(x + 14, 22, title);
 
-  if (shuntRailed) {
-    display.drawStr(0, 64, "SHUNT RAIL");
-  } else if (reverseFlow) {
-    display.drawStr(0, 64, "DIR:REV");
-  } else if (suspectWiring) {
-    display.drawStr(0, 64, "CHK GND/VIN");
+  if (!r.ready) {
+    display.drawStr(x, 38, "NO I2C");
+    return;
   }
 
-  display.sendBuffer();
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%5.2f V", r.busV);
+  display.drawStr(x, 36, buf);
+
+  if (fabsf(r.current_mA) >= 1000.0f) {
+    snprintf(buf, sizeof(buf), "%5.2f A", r.current_mA / 1000.0f);
+  } else {
+    snprintf(buf, sizeof(buf), "%5.0f mA", r.current_mA);
+  }
+  display.drawStr(x, 47, buf);
+
+  if (fabsf(r.power_mW) >= 1000.0f) {
+    snprintf(buf, sizeof(buf), "%5.2f W", r.power_mW / 1000.0f);
+  } else {
+    snprintf(buf, sizeof(buf), "%5.0f mW", r.power_mW);
+  }
+  display.drawStr(x, 58, buf);
+
+  const char* status = "OK";
+  if (r.railed) status = "RAIL";
+  else if (r.reverse) status = "REV";
+  else if (r.noLoad) status = "NOLOAD";
+  display.drawStr(x, 64, status);
 }
 
-void drawError(const char *msg) {
+static void drawDual(const SensorReading& a, const SensorReading& b) {
   display.clearBuffer();
-  display.setFont(u8g2_font_6x12_tf);
-  display.drawStr(0, 12, "INA219 ERROR");
-  display.drawStr(0, 30, msg);
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(16, 10, "Dual Power Monitor");
+  display.drawHLine(0, 12, 128);
+  display.drawHLine(0, 24, 128);
+  display.drawVLine(64, 12, 52);
+  drawColumn(0,  "INA238", a);
+  drawColumn(66, "INA219", b);
   display.sendBuffer();
 }
 
@@ -76,7 +101,7 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println();
-  Serial.println("Booting INA219 power monitor...");
+  Serial.println("Booting dual power monitor (INA238 + INA219)...");
   Serial.printf("OLED driver: %s, bus: %s\n",
                 OLED_IS_SH1106 ? "SH1106" : "SSD1306",
                 OLED_USE_SW_SPI ? "Software SPI" : "Hardware SPI");
@@ -87,26 +112,37 @@ void setup() {
 
   Wire.begin(INA_SDA, INA_SCL);
   Wire.setClock(100000);
-  inaReady = ina219.begin();
-  if (inaReady) {
-    // 12V rail with up to ~2A loads. Resolution ~0.8mA, 4mV bus.
-    ina219.setCalibration_32V_2A();
-    Serial.println("INA219 initialized (32V / 2A range).");
-  } else {
-    Serial.println("INA219 not found on I2C bus (SDA=21, SCL=22).");
+
+  ina238Ready = ina238.begin();
+  if (ina238Ready) {
+    ina238.setShunt(SHUNT_OHMS, 3.2);
   }
+
+  ina219Ready = ina219.begin();
+  if (ina219Ready) {
+    ina219.setCalibration_32V_2A();
+  }
+
+  Serial.printf("INA238 %s @0x40, INA219 %s @0x41\n",
+                ina238Ready ? "OK" : "MISSING",
+                ina219Ready ? "OK" : "MISSING");
 
   display.begin();
   display.setContrast(255);
   display.setPowerSave(0);
 
   display.clearBuffer();
-  display.setFont(u8g2_font_6x12_tf);
-  display.drawStr(0, 12, "Power Monitor");
-  display.drawStr(0, 30, inaReady ? "INA219 OK" : "INA219 NOT FOUND");
-  display.drawStr(0, 48, "Range: 32V / 2A");
+  display.setFont(u8g2_font_6x10_tf);
+  display.drawStr(16, 10, "Dual Power Monitor");
+  display.drawHLine(0, 12, 128);
+  char buf[20];
+  snprintf(buf, sizeof(buf), "INA238: %s", ina238Ready ? "OK" : "MISSING");
+  display.drawStr(0, 28, buf);
+  snprintf(buf, sizeof(buf), "INA219: %s", ina219Ready ? "OK" : "MISSING");
+  display.drawStr(0, 42, buf);
+  display.drawStr(0, 60, "I2C SDA=21 SCL=22");
   display.sendBuffer();
-  delay(800);
+  delay(900);
 }
 
 void loop() {
@@ -116,44 +152,33 @@ void loop() {
   }
   lastRefreshMs = now;
 
-  if (!inaReady) {
-    drawError("Check I2C wiring");
-    return;
+  SensorReading r238 = {};
+  r238.ready = ina238Ready;
+  if (ina238Ready) {
+    r238.busV       = ina238.readBusVoltage();
+    r238.shuntmV    = ina238.readShuntVoltage() * 1000.0f;
+    r238.current_mA = ina238.readCurrent();
+    r238.power_mW   = ina238.readPower();
+    r238.reverse = r238.current_mA < -5.0f;
+    r238.noLoad  = (r238.busV > 5.0f && fabsf(r238.shuntmV) < 1.0f);
   }
 
-  const float shuntmV    = ina219.getShuntVoltage_mV();
-  const float busV       = ina219.getBusVoltage_V();
-  const float current_mA = ina219.getCurrent_mA();
-  const float loadV      = busV + (shuntmV / 1000.0f);
-  const bool shuntRailed = fabsf(shuntmV) >= 319.0f;
-  const float power_mW   = shuntRailed ? 0.0f : (loadV * current_mA);
-  const bool reverseFlow = current_mA < -5.0f;
-  const bool suspectWiring = (busV < 2.0f && fabsf(shuntmV) > 20.0f) || shuntRailed;
-
-  Serial.printf("Vbus=%.2fV  Vload=%.2fV  Vshunt=%.2fmV  I=%.2fmA  P=%.2fmW",
-                busV, loadV, shuntmV, current_mA, power_mW);
-  if (shuntRailed) {
-    Serial.print("  [FAULT: shunt input railed +/-320mV; input saturated/floating]");
-  } else if (reverseFlow) {
-    Serial.print("  [WARN: reverse current; swap VIN+ and VIN-]");
-  } else if (suspectWiring) {
-    Serial.print("  [WARN: low bus + high shunt; check common GND and load path]");
-  }
-  Serial.println();
-
-  if (shuntRailed && !warnedRail) {
-    warnedRail = true;
-    Serial.println("DIAG: INA219 shunt channel is saturated.");
-    Serial.println("DIAG: Common causes:");
-    Serial.println("  1) VIN+ and VIN- not truly in series with the load.");
-    Serial.println("  2) Load negative is not returned to 12V supply negative.");
-    Serial.println("  3) 12V supply negative not tied to ESP32/INA219 GND.");
-    Serial.println("  4) VIN- node floating (no real load connected).");
-    Serial.println("DIAG: Use a multimeter now:");
-    Serial.println("  - Measure VIN+ to GND (should be ~12V)");
-    Serial.println("  - Measure VIN- to GND (should be near VIN+ when idle)");
-    Serial.println("  - Measure VIN+ to VIN- (should be near 0mV at light/no load)");
+  SensorReading r219 = {};
+  r219.ready = ina219Ready;
+  if (ina219Ready) {
+    r219.busV       = ina219.getBusVoltage_V();
+    r219.shuntmV    = ina219.getShuntVoltage_mV();
+    r219.current_mA = ina219.getCurrent_mA();
+    r219.power_mW   = ina219.getPower_mW();
+    r219.reverse = r219.current_mA < -5.0f;
+    // INA219 shunt ADC saturates at +/-320 mV for the +/-2A calibration.
+    r219.railed  = fabsf(r219.shuntmV) >= 319.0f;
+    r219.noLoad  = (r219.busV > 5.0f && fabsf(r219.shuntmV) < 1.0f);
   }
 
-  drawReadings(busV, shuntmV, loadV, current_mA, power_mW, reverseFlow, suspectWiring, shuntRailed);
+  Serial.printf("INA238: V=%.2f I=%.1fmA P=%.1fmW  |  INA219: V=%.2f I=%.1fmA P=%.1fmW\n",
+                r238.busV, r238.current_mA, r238.power_mW,
+                r219.busV, r219.current_mA, r219.power_mW);
+
+  drawDual(r238, r219);
 }
