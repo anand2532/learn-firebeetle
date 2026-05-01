@@ -39,7 +39,11 @@ bool ina219Ready = false;
 
 const unsigned long REFRESH_MS = 500;
 unsigned long lastRefreshMs = 0;
-constexpr float SHUNT_OHMS = 0.1f;
+
+// INA238 hardware shunt on board (e.g. Adafruit INA238 breakout uses R015 = 15 mOhm).
+constexpr float INA238_SHUNT_OHMS       = 0.015f;
+// Max expected current (A) for SHUNT_CAL scaling only; raise if your MPPT can exceed this.
+constexpr float INA238_MAX_EXPECTED_AMPS = 10.0f;
 
 struct SensorReading {
   bool ready;
@@ -115,7 +119,7 @@ void setup() {
 
   ina238Ready = ina238.begin();
   if (ina238Ready) {
-    ina238.setShunt(SHUNT_OHMS, 3.2);
+    ina238.setShunt(INA238_SHUNT_OHMS, INA238_MAX_EXPECTED_AMPS);
   }
 
   ina219Ready = ina219.begin();
