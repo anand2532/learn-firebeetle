@@ -46,7 +46,7 @@ unsigned long lastUploadMs = 0;
 
 const char* WIFI_SSID = "Airtel_vyom";
 const char* WIFI_PASSWORD = "Vyom123@";
-const char* UPLOAD_URL = "http://13.202.45.4:5000/ingest";
+const char* UPLOAD_URL = "http://15.207.18.221:5000/ingest";
 const char* DEVICE_ID = "firebeetle32-dual-ina";
 
 // INA238 hardware shunt on board (e.g. Adafruit INA238 breakout uses R015 = 15 mOhm).
