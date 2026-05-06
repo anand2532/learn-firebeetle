@@ -183,3 +183,13 @@ If you use PlatformIO IDE extension, these tasks map to buttons:
 - Monitor
 
 CLI commands in this README remain the same and are often faster for repeat workflows.
+
+
+
+
+scp -i ./dev_key.pem -r ./current-sensor-data ubuntu@15.207.18.221:~/
+ssh -i ./dev_key.pem ubuntu@15.207.18.221
+sudo cp /home/ubuntu/current-sensor-data/current-sensor-data.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable current-sensor-data.service
+sudo systemctl start current-sensor-data.service
