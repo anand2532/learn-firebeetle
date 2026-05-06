@@ -4,6 +4,8 @@
 #include <U8g2lib.h>
 #include <Adafruit_INA238.h>
 #include <Adafruit_INA219.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 
 // --- OLED pins (unchanged from working bring-up) ---
 #define OLED_MOSI 23
@@ -39,6 +41,13 @@ bool ina219Ready = false;
 
 const unsigned long REFRESH_MS = 500;
 unsigned long lastRefreshMs = 0;
+const unsigned long UPLOAD_MS = 3000;
+unsigned long lastUploadMs = 0;
+
+const char* WIFI_SSID = "Airtel_vyom";
+const char* WIFI_PASSWORD = "Vyom123@";
+const char* UPLOAD_URL = "http://13.202.45.4:5000/ingest";
+const char* DEVICE_ID = "firebeetle32-dual-ina";
 
 // INA238 hardware shunt on board (e.g. Adafruit INA238 breakout uses R015 = 15 mOhm).
 constexpr float INA238_SHUNT_OHMS       = 0.015f;
@@ -55,6 +64,74 @@ struct SensorReading {
   bool railed;
   bool noLoad;
 };
+
+static void connectWifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  Serial.printf("Connecting WiFi: %s\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long startMs = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startMs < 15000) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("WiFi connect timeout, will retry.");
+  }
+}
+
+static String buildPayload(const SensorReading& r238, const SensorReading& r219) {
+  String payload = "{";
+  payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
+  payload += "\"uptime_ms\":" + String(millis()) + ",";
+  payload += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
+  payload += "\"ina238\":{";
+  payload += "\"ready\":" + String(r238.ready ? "true" : "false") + ",";
+  payload += "\"bus_v\":" + String(r238.busV, 3) + ",";
+  payload += "\"current_ma\":" + String(r238.current_mA, 3) + ",";
+  payload += "\"power_mw\":" + String(r238.power_mW, 3) + ",";
+  payload += "\"shunt_mv\":" + String(r238.shuntmV, 3);
+  payload += "},";
+  payload += "\"ina219\":{";
+  payload += "\"ready\":" + String(r219.ready ? "true" : "false") + ",";
+  payload += "\"bus_v\":" + String(r219.busV, 3) + ",";
+  payload += "\"current_ma\":" + String(r219.current_mA, 3) + ",";
+  payload += "\"power_mw\":" + String(r219.power_mW, 3) + ",";
+  payload += "\"shunt_mv\":" + String(r219.shuntmV, 3);
+  payload += "}";
+  payload += "}";
+  return payload;
+}
+
+static void uploadReading(const SensorReading& r238, const SensorReading& r219) {
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWifi();
+    if (WiFi.status() != WL_CONNECTED) {
+      return;
+    }
+  }
+
+  HTTPClient http;
+  http.begin(UPLOAD_URL);
+  http.addHeader("Content-Type", "application/json");
+
+  const String payload = buildPayload(r238, r219);
+  const int responseCode = http.POST(payload);
+  if (responseCode > 0) {
+    Serial.printf("Upload OK, HTTP %d\n", responseCode);
+  } else {
+    Serial.printf("Upload failed: %s\n", http.errorToString(responseCode).c_str());
+  }
+  http.end();
+}
 
 static void drawColumn(int x, const char* title, const SensorReading& r) {
   display.drawStr(x + 14, 22, title);
@@ -130,6 +207,7 @@ void setup() {
   Serial.printf("INA238 %s @0x40, INA219 %s @0x41\n",
                 ina238Ready ? "OK" : "MISSING",
                 ina219Ready ? "OK" : "MISSING");
+  connectWifi();
 
   display.begin();
   display.setContrast(255);
@@ -185,4 +263,9 @@ void loop() {
                 r219.busV, r219.current_mA, r219.power_mW);
 
   drawDual(r238, r219);
+
+  if (now - lastUploadMs >= UPLOAD_MS) {
+    lastUploadMs = now;
+    uploadReading(r238, r219);
+  }
 }
