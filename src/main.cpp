@@ -6,6 +6,7 @@
 #include <Adafruit_INA219.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <time.h>
 
 // --- OLED pins (unchanged from working bring-up) ---
 #define OLED_MOSI 23
@@ -41,13 +42,16 @@ bool ina219Ready = false;
 
 const unsigned long REFRESH_MS = 500;
 unsigned long lastRefreshMs = 0;
-const unsigned long UPLOAD_MS = 3000;
+const unsigned long UPLOAD_MS = 500;
 unsigned long lastUploadMs = 0;
 
 const char* WIFI_SSID = "Airtel_vyom";
 const char* WIFI_PASSWORD = "Vyom123@";
 const char* UPLOAD_URL = "http://15.207.18.221:5000/ingest";
 const char* DEVICE_ID = "firebeetle32-dual-ina";
+const long TIME_GMT_OFFSET_SEC = 19800;  // IST (UTC+5:30)
+const int TIME_DAYLIGHT_OFFSET_SEC = 0;
+bool timeSynced = false;
 
 // INA238 hardware shunt on board (e.g. Adafruit INA238 breakout uses R015 = 15 mOhm).
 constexpr float INA238_SHUNT_OHMS       = 0.015f;
@@ -88,24 +92,52 @@ static void connectWifi() {
   }
 }
 
+static void syncTimeIfNeeded() {
+  if (timeSynced || WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  configTime(TIME_GMT_OFFSET_SEC, TIME_DAYLIGHT_OFFSET_SEC, "pool.ntp.org", "time.google.com");
+  struct tm timeinfo;
+  for (int i = 0; i < 20; i++) {
+    if (getLocalTime(&timeinfo, 500)) {
+      timeSynced = true;
+      Serial.printf("Time synced: %04d-%02d-%02d %02d:%02d:%02d\n",
+                    timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                    timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+      return;
+    }
+  }
+  Serial.println("Time sync failed, will retry.");
+}
+
+static String getIsoTimestamp() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 10)) {
+    return "";
+  }
+  char ts[32];
+  strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S%z", &timeinfo);
+  return String(ts);
+}
+
 static String buildPayload(const SensorReading& r238, const SensorReading& r219) {
+  const String isoTime = getIsoTimestamp();
   String payload = "{";
   payload += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
+  if (isoTime.length() > 0) {
+    payload += "\"timestamp\":\"" + isoTime + "\",";
+  }
   payload += "\"uptime_ms\":" + String(millis()) + ",";
-  payload += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
   payload += "\"ina238\":{";
-  payload += "\"ready\":" + String(r238.ready ? "true" : "false") + ",";
-  payload += "\"bus_v\":" + String(r238.busV, 3) + ",";
+  payload += "\"voltage_v\":" + String(r238.busV, 3) + ",";
   payload += "\"current_ma\":" + String(r238.current_mA, 3) + ",";
-  payload += "\"power_mw\":" + String(r238.power_mW, 3) + ",";
-  payload += "\"shunt_mv\":" + String(r238.shuntmV, 3);
+  payload += "\"power_mw\":" + String(r238.power_mW, 3);
   payload += "},";
   payload += "\"ina219\":{";
-  payload += "\"ready\":" + String(r219.ready ? "true" : "false") + ",";
-  payload += "\"bus_v\":" + String(r219.busV, 3) + ",";
+  payload += "\"voltage_v\":" + String(r219.busV, 3) + ",";
   payload += "\"current_ma\":" + String(r219.current_mA, 3) + ",";
-  payload += "\"power_mw\":" + String(r219.power_mW, 3) + ",";
-  payload += "\"shunt_mv\":" + String(r219.shuntmV, 3);
+  payload += "\"power_mw\":" + String(r219.power_mW, 3);
   payload += "}";
   payload += "}";
   return payload;
@@ -117,7 +149,9 @@ static void uploadReading(const SensorReading& r238, const SensorReading& r219) 
     if (WiFi.status() != WL_CONNECTED) {
       return;
     }
+    timeSynced = false;
   }
+  syncTimeIfNeeded();
 
   HTTPClient http;
   http.begin(UPLOAD_URL);
